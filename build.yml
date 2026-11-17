@@ -1,0 +1,644 @@
+name: Build Kinetic Works (Create addon - NeoForge 1.21.1)
+
+# Put this file at .github/workflows/build.yml in an empty repo.
+# It generates the whole addon (code, blocks, recipes, textures, icon), then builds the jar.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      # ------------------------------------------------------------------
+      # Gradle project files
+      # ------------------------------------------------------------------
+      - name: Generate Gradle files
+        run: |
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  gradlePluginPortal()
+                  maven { url = 'https://maven.neoforged.net/releases' }
+              }
+          }
+          rootProject.name = 'kineticworks'
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.daemon=false
+          systemProp.org.gradle.internal.http.connectionTimeout=60000
+          systemProp.org.gradle.internal.http.socketTimeout=60000
+          mod_id=kineticworks
+          mod_version=1.0.0
+          minecraft_version=1.21.1
+          neo_version=21.1.219
+          create_version=6.0.11-319
+          ponder_version=1.0.85
+          flywheel_version=1.0.6
+          registrate_version=MC1.21-1.3.0+67
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'java'
+              id 'net.neoforged.moddev' version '2.0.78'
+          }
+
+          version = mod_version
+          group = 'com.example.kineticworks'
+          base { archivesName = mod_id }
+
+          java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+          repositories {
+              mavenCentral()
+              maven { url = 'https://maven.createmod.net' }
+              maven { url = 'https://maven.ithundxr.dev/snapshots' }
+              maven { url = 'https://modmaven.dev' }
+          }
+
+          neoForge {
+              version = neo_version
+              runs {
+                  client { client() }
+                  server { server() }
+              }
+              mods {
+                  "${mod_id}" { sourceSet sourceSets.main }
+              }
+          }
+
+          dependencies {
+              implementation("com.simibubi.create:create-${minecraft_version}:${create_version}:slim") { transitive = false }
+              implementation("net.createmod.ponder:Ponder-NeoForge-${minecraft_version}:${ponder_version}")
+              compileOnly("dev.engine-room.flywheel:flywheel-neoforge-api-${minecraft_version}:${flywheel_version}")
+              runtimeOnly("dev.engine-room.flywheel:flywheel-neoforge-${minecraft_version}:${flywheel_version}")
+              implementation("com.tterrag.registrate:Registrate:${registrate_version}")
+          }
+
+          tasks.named('processResources', ProcessResources).configure {
+              var props = [mod_id: mod_id, mod_version: mod_version]
+              inputs.properties props
+              filesMatching('META-INF/neoforge.mods.toml') { expand props }
+          }
+          EOF
+
+      # ------------------------------------------------------------------
+      # Java source
+      # ------------------------------------------------------------------
+      - name: Generate Java sources
+        run: |
+          J=src/main/java/com/example/kineticworks
+          mkdir -p $J
+
+          cat > $J/KineticWorks.java <<'EOF'
+          package com.example.kineticworks;
+
+          import net.neoforged.bus.api.IEventBus;
+          import net.neoforged.fml.common.Mod;
+
+          @Mod(KineticWorks.MODID)
+          public class KineticWorks {
+              public static final String MODID = "kineticworks";
+
+              public KineticWorks(IEventBus modBus) {
+                  ModRegistry.register(modBus);
+              }
+          }
+          EOF
+
+          # Kinetic block entity with a configurable stress impact
+          cat > $J/StressedBE.java <<'EOF'
+          package com.example.kineticworks;
+
+          import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+
+          public class StressedBE extends KineticBlockEntity {
+              private final float impact;
+
+              public StressedBE(BlockEntityType<?> type, BlockPos pos, BlockState state, float impact) {
+                  super(type, pos, state);
+                  this.impact = impact;
+              }
+
+              @Override
+              public float calculateStressApplied() {
+                  return impact;
+              }
+
+              @Override
+              public void onSpeedChanged(float previousSpeed) {
+                  super.onSpeedChanged(previousSpeed);
+                  if (level != null && !level.isClientSide) {
+                      level.updateNeighborsAt(worldPosition, getBlockState().getBlock());
+                  }
+              }
+          }
+          EOF
+
+          # Mechanic 1: Kinetic Launch Pad - launches entities upward based on RPM
+          cat > $J/LaunchPadBlock.java <<'EOF'
+          package com.example.kineticworks;
+
+          import com.simibubi.create.content.kinetics.base.KineticBlock;
+          import com.simibubi.create.foundation.block.IBE;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.world.entity.Entity;
+          import net.minecraft.world.level.BlockGetter;
+          import net.minecraft.world.level.Level;
+          import net.minecraft.world.level.LevelReader;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.minecraft.world.phys.Vec3;
+          import net.minecraft.world.phys.shapes.CollisionContext;
+          import net.minecraft.world.phys.shapes.VoxelShape;
+          import net.minecraft.world.level.block.Block;
+
+          public class LaunchPadBlock extends KineticBlock implements IBE<StressedBE> {
+              private static final VoxelShape SHAPE = Block.box(0, 0, 0, 16, 6, 16);
+
+              public LaunchPadBlock(Properties properties) {
+                  super(properties);
+              }
+
+              @Override
+              protected VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext ctx) {
+                  return SHAPE;
+              }
+
+              @Override
+              public boolean hasShaftTowards(LevelReader world, BlockPos pos, BlockState state, Direction face) {
+                  return face == Direction.DOWN;
+              }
+
+              @Override
+              public Direction.Axis getRotationAxis(BlockState state) {
+                  return Direction.Axis.Y;
+              }
+
+              @Override
+              public void stepOn(Level level, BlockPos pos, BlockState state, Entity entity) {
+                  withBlockEntityDo(level, pos, be -> {
+                      float speed = Math.abs(be.getSpeed());
+                      if (speed < 16) return;
+                      double boost = Math.min(2.5, speed / 64.0);
+                      Vec3 m = entity.getDeltaMovement();
+                      entity.setDeltaMovement(m.x, Math.max(m.y, boost), m.z);
+                      entity.fallDistance = 0;
+                      entity.hurtMarked = true;
+                  });
+                  super.stepOn(level, pos, state, entity);
+              }
+
+              @Override
+              public Class<StressedBE> getBlockEntityClass() {
+                  return StressedBE.class;
+              }
+
+              @Override
+              public BlockEntityType<? extends StressedBE> getBlockEntityType() {
+                  return ModRegistry.LAUNCH_PAD_BE.get();
+              }
+          }
+          EOF
+
+          # Mechanic 2: Kinetic Sensor - redstone output scales with rotation speed
+          cat > $J/SensorBlock.java <<'EOF'
+          package com.example.kineticworks;
+
+          import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+          import com.simibubi.create.content.kinetics.base.RotatedPillarKineticBlock;
+          import com.simibubi.create.foundation.block.IBE;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.util.Mth;
+          import net.minecraft.world.level.BlockGetter;
+          import net.minecraft.world.level.LevelReader;
+          import net.minecraft.world.level.block.entity.BlockEntity;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+
+          public class SensorBlock extends RotatedPillarKineticBlock implements IBE<StressedBE> {
+              public SensorBlock(Properties properties) {
+                  super(properties);
+              }
+
+              @Override
+              public boolean hasShaftTowards(LevelReader world, BlockPos pos, BlockState state, Direction face) {
+                  return face.getAxis() == state.getValue(AXIS);
+              }
+
+              @Override
+              public Direction.Axis getRotationAxis(BlockState state) {
+                  return state.getValue(AXIS);
+              }
+
+              @Override
+              protected boolean isSignalSource(BlockState state) {
+                  return true;
+              }
+
+              @Override
+              protected int getSignal(BlockState state, BlockGetter level, BlockPos pos, Direction dir) {
+                  BlockEntity be = level.getBlockEntity(pos);
+                  if (be instanceof KineticBlockEntity kbe) {
+                      return Mth.clamp((int) (Math.abs(kbe.getSpeed()) / 16f), 0, 15);
+                  }
+                  return 0;
+              }
+
+              @Override
+              public Class<StressedBE> getBlockEntityClass() {
+                  return StressedBE.class;
+              }
+
+              @Override
+              public BlockEntityType<? extends StressedBE> getBlockEntityType() {
+                  return ModRegistry.SENSOR_BE.get();
+              }
+          }
+          EOF
+
+          cat > $J/ModRegistry.java <<'EOF'
+          package com.example.kineticworks;
+
+          import java.util.function.Supplier;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.core.registries.Registries;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.world.item.BlockItem;
+          import net.minecraft.world.item.CreativeModeTab;
+          import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.SoundType;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockBehaviour;
+          import net.minecraft.world.level.material.MapColor;
+          import net.neoforged.bus.api.IEventBus;
+          import net.neoforged.neoforge.registries.DeferredBlock;
+          import net.neoforged.neoforge.registries.DeferredItem;
+          import net.neoforged.neoforge.registries.DeferredRegister;
+
+          public class ModRegistry {
+              public static final String ID = KineticWorks.MODID;
+
+              public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(ID);
+              public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(ID);
+              public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
+                      DeferredRegister.create(BuiltInRegistries.BLOCK_ENTITY_TYPE, ID);
+              public static final DeferredRegister<CreativeModeTab> TABS =
+                      DeferredRegister.create(Registries.CREATIVE_MODE_TAB, ID);
+
+              // Blocks
+              public static final DeferredBlock<Block> BRASS_PLATING = BLOCKS.registerSimpleBlock("brass_plating",
+                      BlockBehaviour.Properties.of().mapColor(MapColor.GOLD).strength(3.0f, 6.0f)
+                              .sound(SoundType.COPPER).requiresCorrectToolForDrops());
+
+              public static final DeferredBlock<LaunchPadBlock> LAUNCH_PAD = BLOCKS.registerBlock("kinetic_launch_pad",
+                      LaunchPadBlock::new,
+                      BlockBehaviour.Properties.of().mapColor(MapColor.METAL).strength(3.0f, 6.0f)
+                              .sound(SoundType.NETHERITE_BLOCK).requiresCorrectToolForDrops().noOcclusion());
+
+              public static final DeferredBlock<SensorBlock> SENSOR = BLOCKS.registerBlock("kinetic_sensor",
+                      SensorBlock::new,
+                      BlockBehaviour.Properties.of().mapColor(MapColor.STONE).strength(3.0f, 6.0f)
+                              .sound(SoundType.WOOD).requiresCorrectToolForDrops());
+
+              // Items
+              public static final DeferredItem<BlockItem> BRASS_PLATING_ITEM = ITEMS.registerSimpleBlockItem(BRASS_PLATING);
+              public static final DeferredItem<BlockItem> LAUNCH_PAD_ITEM = ITEMS.registerSimpleBlockItem(LAUNCH_PAD);
+              public static final DeferredItem<BlockItem> SENSOR_ITEM = ITEMS.registerSimpleBlockItem(SENSOR);
+
+              // Block entities
+              public static final Supplier<BlockEntityType<StressedBE>> LAUNCH_PAD_BE =
+                      BLOCK_ENTITIES.register("kinetic_launch_pad", () -> BlockEntityType.Builder
+                              .of((pos, state) -> new StressedBE(ModRegistry.LAUNCH_PAD_BE.get(), pos, state, 2.0f),
+                                      LAUNCH_PAD.get())
+                              .build(null));
+
+              public static final Supplier<BlockEntityType<StressedBE>> SENSOR_BE =
+                      BLOCK_ENTITIES.register("kinetic_sensor", () -> BlockEntityType.Builder
+                              .of((pos, state) -> new StressedBE(ModRegistry.SENSOR_BE.get(), pos, state, 0.5f),
+                                      SENSOR.get())
+                              .build(null));
+
+              // Creative tab
+              public static final Supplier<CreativeModeTab> TAB = TABS.register("main", () -> CreativeModeTab.builder()
+                      .title(Component.translatable("itemGroup." + ID))
+                      .icon(() -> new ItemStack(LAUNCH_PAD_ITEM.get()))
+                      .displayItems((params, output) -> {
+                          output.accept(BRASS_PLATING_ITEM.get());
+                          output.accept(LAUNCH_PAD_ITEM.get());
+                          output.accept(SENSOR_ITEM.get());
+                      })
+                      .build());
+
+              public static void register(IEventBus bus) {
+                  BLOCKS.register(bus);
+                  ITEMS.register(bus);
+                  BLOCK_ENTITIES.register(bus);
+                  TABS.register(bus);
+              }
+          }
+          EOF
+
+      # ------------------------------------------------------------------
+      # mods.toml, blockstates, models, lang, loot, recipes, tags
+      # ------------------------------------------------------------------
+      - name: Generate data and assets
+        run: |
+          R=src/main/resources
+          A=$R/assets/kineticworks
+          D=$R/data/kineticworks
+          mkdir -p $R/META-INF $A/blockstates $A/models/block $A/models/item $A/lang $A/textures/block \
+                   $D/loot_table/blocks $D/recipe $R/data/minecraft/tags/block/mineable
+
+          cat > $R/META-INF/neoforge.mods.toml <<'EOF'
+          modLoader = "javafml"
+          loaderVersion = "[4,)"
+          license = "MIT"
+
+          [[mods]]
+          modId = "kineticworks"
+          version = "${mod_version}"
+          displayName = "Kinetic Works"
+          authors = "You"
+          logoFile = "logo.png"
+          description = '''
+          A Create addon adding Brass Plating, the Kinetic Launch Pad and the Kinetic Sensor.
+          '''
+
+          [[dependencies.kineticworks]]
+          modId = "neoforge"
+          type = "required"
+          versionRange = "[21.1,)"
+          ordering = "NONE"
+          side = "BOTH"
+
+          [[dependencies.kineticworks]]
+          modId = "minecraft"
+          type = "required"
+          versionRange = "[1.21.1,1.22)"
+          ordering = "NONE"
+          side = "BOTH"
+
+          [[dependencies.kineticworks]]
+          modId = "create"
+          type = "required"
+          versionRange = "[6.0,)"
+          ordering = "AFTER"
+          side = "BOTH"
+          EOF
+
+          # Blockstates
+          echo '{"variants":{"":{"model":"kineticworks:block/brass_plating"}}}' > $A/blockstates/brass_plating.json
+          echo '{"variants":{"":{"model":"kineticworks:block/kinetic_launch_pad"}}}' > $A/blockstates/kinetic_launch_pad.json
+          cat > $A/blockstates/kinetic_sensor.json <<'EOF'
+          {
+            "variants": {
+              "axis=y": { "model": "kineticworks:block/kinetic_sensor" },
+              "axis=z": { "model": "kineticworks:block/kinetic_sensor", "x": 90 },
+              "axis=x": { "model": "kineticworks:block/kinetic_sensor", "x": 90, "y": 90 }
+            }
+          }
+          EOF
+
+          # Models
+          cat > $A/models/block/brass_plating.json <<'EOF'
+          { "parent": "minecraft:block/cube_all", "textures": { "all": "kineticworks:block/brass_plating" } }
+          EOF
+          cat > $A/models/block/kinetic_sensor.json <<'EOF'
+          { "parent": "minecraft:block/cube_column",
+            "textures": { "end": "kineticworks:block/sensor_end", "side": "kineticworks:block/sensor_side" } }
+          EOF
+          cat > $A/models/block/kinetic_launch_pad.json <<'EOF'
+          {
+            "parent": "minecraft:block/block",
+            "textures": {
+              "top": "kineticworks:block/pad_top",
+              "side": "kineticworks:block/pad_side",
+              "bottom": "kineticworks:block/pad_side",
+              "particle": "kineticworks:block/pad_side"
+            },
+            "elements": [
+              {
+                "from": [0, 0, 0],
+                "to": [16, 6, 16],
+                "faces": {
+                  "down":  { "uv": [0, 0, 16, 16], "texture": "#bottom", "cullface": "down" },
+                  "up":    { "uv": [0, 0, 16, 16], "texture": "#top" },
+                  "north": { "uv": [0, 10, 16, 16], "texture": "#side", "cullface": "north" },
+                  "south": { "uv": [0, 10, 16, 16], "texture": "#side", "cullface": "south" },
+                  "west":  { "uv": [0, 10, 16, 16], "texture": "#side", "cullface": "west" },
+                  "east":  { "uv": [0, 10, 16, 16], "texture": "#side", "cullface": "east" }
+                }
+              }
+            ]
+          }
+          EOF
+          for b in brass_plating kinetic_launch_pad kinetic_sensor; do
+            echo "{\"parent\":\"kineticworks:block/$b\"}" > $A/models/item/$b.json
+          done
+
+          # Language
+          cat > $A/lang/en_us.json <<'EOF'
+          {
+            "itemGroup.kineticworks": "Kinetic Works",
+            "block.kineticworks.brass_plating": "Brass Plating",
+            "block.kineticworks.kinetic_launch_pad": "Kinetic Launch Pad",
+            "block.kineticworks.kinetic_sensor": "Kinetic Sensor"
+          }
+          EOF
+
+          # Loot tables (drop themselves)
+          for b in brass_plating kinetic_launch_pad kinetic_sensor; do
+            cat > $D/loot_table/blocks/$b.json <<EOF
+          {"type":"minecraft:block","pools":[{"rolls":1.0,"bonus_rolls":0.0,"conditions":[{"condition":"minecraft:survives_explosion"}],"entries":[{"type":"minecraft:item","name":"kineticworks:$b"}]}]}
+          EOF
+          done
+
+          # Mineable with pickaxe
+          cat > $R/data/minecraft/tags/block/mineable/pickaxe.json <<'EOF'
+          { "replace": false, "values": [
+            "kineticworks:brass_plating",
+            "kineticworks:kinetic_launch_pad",
+            "kineticworks:kinetic_sensor" ] }
+          EOF
+
+          # Recipes
+          cat > $D/recipe/brass_plating.json <<'EOF'
+          {
+            "type": "minecraft:crafting_shaped",
+            "pattern": ["BA", "AB"],
+            "key": {
+              "B": { "item": "create:brass_ingot" },
+              "A": { "item": "create:andesite_alloy" }
+            },
+            "result": { "id": "kineticworks:brass_plating", "count": 4 }
+          }
+          EOF
+          cat > $D/recipe/kinetic_launch_pad.json <<'EOF'
+          {
+            "type": "minecraft:crafting_shaped",
+            "pattern": ["PPP", "ASA"],
+            "key": {
+              "P": { "item": "kineticworks:brass_plating" },
+              "A": { "item": "create:andesite_alloy" },
+              "S": { "item": "create:shaft" }
+            },
+            "result": { "id": "kineticworks:kinetic_launch_pad", "count": 1 }
+          }
+          EOF
+          cat > $D/recipe/kinetic_sensor.json <<'EOF'
+          {
+            "type": "minecraft:crafting_shaped",
+            "pattern": ["PRP", " S "],
+            "key": {
+              "P": { "item": "kineticworks:brass_plating" },
+              "R": { "item": "minecraft:redstone" },
+              "S": { "item": "create:shaft" }
+            },
+            "result": { "id": "kineticworks:kinetic_sensor", "count": 1 }
+          }
+          EOF
+
+      # ------------------------------------------------------------------
+      # Textures + mod ICON (logo.png) generated with pure Python
+      # ------------------------------------------------------------------
+      - name: Generate textures and icon
+        run: |
+          cat > gen_textures.py <<'EOF'
+          import zlib, struct, math, os
+
+          R = 'src/main/resources'
+          T = R + '/assets/kineticworks/textures/block'
+          os.makedirs(T, exist_ok=True)
+
+          def png(path, w, h, fn):
+              raw = bytearray()
+              for y in range(h):
+                  raw.append(0)
+                  for x in range(w):
+                      raw.extend(fn(x, y))
+              def ch(t, d):
+                  return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+              data = (b'\x89PNG\r\n\x1a\n'
+                      + ch(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+                      + ch(b'IDAT', zlib.compress(bytes(raw), 9))
+                      + ch(b'IEND', b''))
+              with open(path, 'wb') as f:
+                  f.write(data)
+
+          def shade(c, f):
+              return tuple(max(0, min(255, int(v * f))) for v in c) + (255,)
+
+          def noise(x, y, s=0):
+              return ((x * 73856093 ^ y * 19349663 ^ s * 83492791) % 100) / 100.0
+
+          BRASS = (206, 163, 64)
+          ANDESITE = (140, 140, 130)
+
+          def brass(x, y):
+              f = 1.0
+              if x in (0, 15) or y in (0, 15):
+                  f = 0.72
+              elif x in (1, 14) or y in (1, 14):
+                  f = 1.12
+              if (x, y) in [(3, 3), (12, 3), (3, 12), (12, 12)]:
+                  f = 1.3
+              f += (noise(x, y, 1) - 0.5) * 0.12
+              return shade(BRASS, f)
+
+          def andesite(x, y):
+              return shade(ANDESITE, 0.9 + noise(x, y, 2) * 0.2)
+
+          def pad_top(x, y):
+              if x < 3 or x > 12 or y < 3 or y > 12:
+                  return shade((235, 190, 40), 1) if ((x + y) // 3) % 2 == 0 else shade((40, 40, 44), 1)
+              return shade((70, 72, 80), 0.92 + noise(x, y, 3) * 0.16)
+
+          def pad_side(x, y):
+              if y < 2:
+                  return shade(BRASS, 0.9)
+              return andesite(x, y)
+
+          def sensor_end(x, y):
+              d = math.hypot(x - 7.5, y - 7.5)
+              if d < 2.5:
+                  return shade((60, 45, 30), 1)
+              if 5 <= d < 7:
+                  return shade(BRASS, 1.05)
+              return andesite(x, y)
+
+          def sensor_side(x, y):
+              if y in (0, 15):
+                  return shade(ANDESITE, 0.6)
+              if 6 <= y <= 9:
+                  return shade(BRASS, 1.0 if y in (7, 8) else 0.8)
+              return andesite(x, y)
+
+          png(T + '/brass_plating.png', 16, 16, brass)
+          png(T + '/pad_top.png', 16, 16, pad_top)
+          png(T + '/pad_side.png', 16, 16, pad_side)
+          png(T + '/sensor_end.png', 16, 16, sensor_end)
+          png(T + '/sensor_side.png', 16, 16, sensor_side)
+
+          # ---- Mod icon: brass cogwheel on a dark gradient (128x128) ----
+          def icon(x, y):
+              dx, dy = x - 63.5, y - 63.5
+              r = math.hypot(dx, dy)
+              a = math.atan2(dy, dx)
+              bg = (24 + y // 5, 26 + y // 8, 44 + y // 3, 255)
+              outer = 46 + (9 if math.sin(8 * a) > 0 else 0)
+              if r < 13:
+                  return (20, 18, 28, 255)
+              if r <= outer:
+                  if 24 < r < 29:
+                      return shade(ANDESITE, 0.8)
+                  if 13 <= r < 17:
+                      return shade(BRASS, 0.7)
+                  f = 0.78 + 0.45 * (1 - r / 56.0) + (0.12 if dx + dy < 0 else -0.05)
+                  return shade(BRASS, f)
+              return bg
+
+          png(R + '/logo.png', 128, 128, icon)
+          EOF
+          python3 gen_textures.py
+          rm gen_textures.py
+          ls -R src/main/resources | head -50
+
+      # ------------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------------
+      - name: Build mod
+        run: gradle build --no-daemon --stacktrace --console=plain
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: kineticworks-1.21.1-neoforge
+          path: build/libs/*.jar
+          if-no-files-found: error
