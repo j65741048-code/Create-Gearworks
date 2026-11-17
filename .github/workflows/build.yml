@@ -897,7 +897,27 @@ jobs:
           find src -type f | sort
 
       - name: Build
-        run: gradle build --no-daemon --stacktrace
+        shell: bash
+        run: gradle build --no-daemon --stacktrace --console=plain 2>&1 | tee build.log
+
+      - name: Error summary (only on failure)
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '## First errors in the build log'
+            echo '```'
+            grep -nE 'error:|Could not (resolve|find|GET)|What went wrong|Execution failed|not found|cannot find symbol|package .* does not exist' build.log | head -25 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-gearworks-fabric-1.20.1
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload jar
         uses: actions/upload-artifact@v4
