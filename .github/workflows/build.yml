@@ -1,1 +1,901 @@
+name: Build Gearworks (Fabric 1.20.1)
 
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      create_version:
+        description: 'Create version to compile against (leave empty for the default)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Generate the mod project (sources, textures, icon, recipes)
+        env:
+          CREATE_VERSION_INPUT: ${{ github.event.inputs.create_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p src/main/java/dev/gearworks/block src/main/java/dev/gearworks/blockentity src/main/resources tools
+          cat > settings.gradle <<'GW_EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'gearworks-fabric-1.20.1'
+          GW_EOF
+          CREATE_VERSION="${CREATE_VERSION_INPUT:-0.5.1-j-build.1600+mc1.20.1}"
+          cat > gradle.properties <<GW_EOF
+          org.gradle.jvmargs=-Xmx3G
+          org.gradle.daemon=false
+          mod_version=1.0.0
+          minecraft_version=1.20.1
+          loader_version=0.16.10
+          fabric_version=0.92.2+1.20.1
+          create_version=$CREATE_VERSION
+          GW_EOF
+          cat > build.gradle <<'GW_EOF'
+          plugins {
+              id 'fabric-loom' version '1.8.+'
+          }
+
+          version = project.mod_version
+          group = 'dev.gearworks'
+
+          base {
+              archivesName = 'gearworks-fabric-1.20.1'
+          }
+
+          repositories {
+              mavenCentral()
+              maven { url = 'https://mvn.devos.one/snapshots/' }
+              maven { url = 'https://mvn.devos.one/releases/' }
+              maven { url = 'https://maven.tterrag.com/' }
+              maven {
+                  url = 'https://maven.jamieswhiteshirt.com/libs-release'
+                  content { includeGroup 'com.jamieswhiteshirt' }
+              }
+              maven {
+                  url = 'https://jitpack.io/'
+                  content { includeGroupAndSubgroups 'com.github' }
+              }
+              maven { url = 'https://maven.terraformersmc.com/releases/' }
+              maven { url = 'https://maven.shedaniel.me/' }
+              maven { url = 'https://maven.blamejared.com/' }
+              maven {
+                  url = 'https://api.modrinth.com/maven'
+                  content { includeGroup 'maven.modrinth' }
+              }
+          }
+
+          configurations.configureEach {
+              resolutionStrategy {
+                  force "net.fabricmc:fabric-loader:${project.loader_version}"
+              }
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings loom.officialMojangMappings()
+
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+              // Create Fabric (its own dependencies are resolved transitively)
+              modImplementation "com.simibubi.create:create-fabric-${project.minecraft_version}:${project.create_version}"
+          }
+
+          processResources {
+              inputs.property 'version', project.version
+              filesMatching('fabric.mod.json') {
+                  expand 'version': project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.release = 17
+              options.encoding = 'UTF-8'
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+          }
+          GW_EOF
+          cat > src/main/resources/fabric.mod.json <<'GW_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "gearworks",
+            "version": "${version}",
+            "name": "Gearworks",
+            "description": "A Create addon: Overdrive and Underdrive gearboxes, a Redstone Dynamo, a Kinetic Lamp and Gearworks casing.",
+            "authors": ["Gearworks"],
+            "license": "MIT",
+            "icon": "assets/gearworks/icon.png",
+            "environment": "*",
+            "entrypoints": {
+              "main": ["dev.gearworks.Gearworks"]
+            },
+            "depends": {
+              "fabricloader": ">=0.14.21",
+              "minecraft": "1.20.1",
+              "java": ">=17",
+              "fabric-api": "*",
+              "create": "*"
+            }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/block/KineticLampBlock.java <<'GW_EOF'
+          package dev.gearworks.block;
+
+          import com.simibubi.create.content.kinetics.base.RotatedPillarKineticBlock;
+          import com.simibubi.create.foundation.block.IBE;
+          import dev.gearworks.ModBlockEntities;
+          import dev.gearworks.blockentity.KineticLampBlockEntity;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.world.level.LevelReader;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.minecraft.world.level.block.state.StateDefinition;
+          import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+          import net.minecraft.world.level.block.state.properties.BooleanProperty;
+
+          /** A lamp that glows while it is spun by a Create kinetic network. */
+          public class KineticLampBlock extends RotatedPillarKineticBlock implements IBE<KineticLampBlockEntity> {
+              public static final BooleanProperty LIT = BlockStateProperties.LIT;
+
+              public KineticLampBlock(Properties properties) {
+                  super(properties);
+                  registerDefaultState(defaultBlockState().setValue(LIT, false));
+              }
+
+              @Override
+              protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
+                  super.createBlockStateDefinition(builder);
+                  builder.add(LIT);
+              }
+
+              @Override
+              public boolean hasShaftTowards(LevelReader world, BlockPos pos, BlockState state, Direction face) {
+                  return face.getAxis() == state.getValue(AXIS);
+              }
+
+              @Override
+              public Class<KineticLampBlockEntity> getBlockEntityClass() {
+                  return KineticLampBlockEntity.class;
+              }
+
+              @Override
+              public BlockEntityType<? extends KineticLampBlockEntity> getBlockEntityType() {
+                  return ModBlockEntities.kineticLamp();
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/block/GearboxBlock.java <<'GW_EOF'
+          package dev.gearworks.block;
+
+          import com.simibubi.create.content.kinetics.base.RotatedPillarKineticBlock;
+          import com.simibubi.create.foundation.block.IBE;
+          import dev.gearworks.ModBlockEntities;
+          import dev.gearworks.blockentity.GearboxBlockEntity;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.world.level.LevelReader;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+
+          /** Inline gearbox: output side turns at (input speed * ratio). Used for Overdrive (x2) and Underdrive (x0.5). */
+          public class GearboxBlock extends RotatedPillarKineticBlock implements IBE<GearboxBlockEntity> {
+              private final float ratio;
+
+              public GearboxBlock(Properties properties, float ratio) {
+                  super(properties);
+                  this.ratio = ratio;
+              }
+
+              public float getRatio() {
+                  return ratio;
+              }
+
+              @Override
+              public boolean hasShaftTowards(LevelReader world, BlockPos pos, BlockState state, Direction face) {
+                  return face.getAxis() == state.getValue(AXIS);
+              }
+
+              @Override
+              public Class<GearboxBlockEntity> getBlockEntityClass() {
+                  return GearboxBlockEntity.class;
+              }
+
+              @Override
+              public BlockEntityType<? extends GearboxBlockEntity> getBlockEntityType() {
+                  return ModBlockEntities.gearbox();
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/block/RedstoneDynamoBlock.java <<'GW_EOF'
+          package dev.gearworks.block;
+
+          import com.simibubi.create.content.kinetics.base.DirectionalKineticBlock;
+          import com.simibubi.create.foundation.block.IBE;
+          import dev.gearworks.ModBlockEntities;
+          import dev.gearworks.blockentity.RedstoneDynamoBlockEntity;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.world.item.context.BlockPlaceContext;
+          import net.minecraft.world.level.Level;
+          import net.minecraft.world.level.LevelReader;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+          import net.minecraft.world.level.block.state.BlockState;
+          import net.minecraft.world.level.block.state.StateDefinition;
+          import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+          import net.minecraft.world.level.block.state.properties.IntegerProperty;
+
+          /** Kinetic generator driven by redstone: speed = 4 RPM per signal strength (max 60 RPM). */
+          public class RedstoneDynamoBlock extends DirectionalKineticBlock implements IBE<RedstoneDynamoBlockEntity> {
+              public static final IntegerProperty POWER = BlockStateProperties.POWER;
+
+              public RedstoneDynamoBlock(Properties properties) {
+                  super(properties);
+                  registerDefaultState(defaultBlockState().setValue(POWER, 0));
+              }
+
+              @Override
+              protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
+                  super.createBlockStateDefinition(builder);
+                  builder.add(POWER);
+              }
+
+              @Override
+              public BlockState getStateForPlacement(BlockPlaceContext context) {
+                  BlockState state = super.getStateForPlacement(context);
+                  if (state == null) {
+                      return null;
+                  }
+                  return state.setValue(POWER, context.getLevel().getBestNeighborSignal(context.getClickedPos()));
+              }
+
+              @Override
+              public void neighborChanged(BlockState state, Level level, BlockPos pos, Block block, BlockPos fromPos, boolean isMoving) {
+                  super.neighborChanged(state, level, pos, block, fromPos, isMoving);
+                  if (level.isClientSide) {
+                      return;
+                  }
+                  int power = level.getBestNeighborSignal(pos);
+                  if (power != state.getValue(POWER)) {
+                      level.setBlock(pos, state.setValue(POWER, power), Block.UPDATE_ALL);
+                      withBlockEntityDo(level, pos, RedstoneDynamoBlockEntity::updateGeneratedRotation);
+                  }
+              }
+
+              @Override
+              public boolean hasShaftTowards(LevelReader world, BlockPos pos, BlockState state, Direction face) {
+                  return face == state.getValue(FACING);
+              }
+
+              @Override
+              public Class<RedstoneDynamoBlockEntity> getBlockEntityClass() {
+                  return RedstoneDynamoBlockEntity.class;
+              }
+
+              @Override
+              public BlockEntityType<? extends RedstoneDynamoBlockEntity> getBlockEntityType() {
+                  return ModBlockEntities.redstoneDynamo();
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/blockentity/KineticLampBlockEntity.java <<'GW_EOF'
+          package dev.gearworks.blockentity;
+
+          import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+          import dev.gearworks.ModBlockEntities;
+          import dev.gearworks.block.KineticLampBlock;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.state.BlockState;
+
+          public class KineticLampBlockEntity extends KineticBlockEntity {
+              public KineticLampBlockEntity(BlockPos pos, BlockState state) {
+                  super(ModBlockEntities.kineticLamp(), pos, state);
+              }
+
+              @Override
+              public float calculateStressApplied() {
+                  this.lastStressApplied = 1.0f;
+                  return 1.0f;
+              }
+
+              @Override
+              public void onSpeedChanged(float previousSpeed) {
+                  super.onSpeedChanged(previousSpeed);
+                  refreshLit();
+              }
+
+              @Override
+              public void tick() {
+                  super.tick();
+                  if (level != null && !level.isClientSide && level.getGameTime() % 20 == 0) {
+                      refreshLit();
+                  }
+              }
+
+              private void refreshLit() {
+                  if (level == null || level.isClientSide) {
+                      return;
+                  }
+                  BlockState state = getBlockState();
+                  if (!(state.getBlock() instanceof KineticLampBlock)) {
+                      return;
+                  }
+                  boolean lit = Math.abs(getSpeed()) > 0.0f;
+                  if (state.getValue(KineticLampBlock.LIT) != lit) {
+                      level.setBlock(worldPosition, state.setValue(KineticLampBlock.LIT, lit), Block.UPDATE_ALL);
+                  }
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/blockentity/GearboxBlockEntity.java <<'GW_EOF'
+          package dev.gearworks.blockentity;
+
+          import com.simibubi.create.content.kinetics.transmission.SplitShaftBlockEntity;
+          import dev.gearworks.ModBlockEntities;
+          import dev.gearworks.block.GearboxBlock;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.world.level.block.state.BlockState;
+
+          public class GearboxBlockEntity extends SplitShaftBlockEntity {
+              public GearboxBlockEntity(BlockPos pos, BlockState state) {
+                  super(ModBlockEntities.gearbox(), pos, state);
+              }
+
+              @Override
+              public float getRotationSpeedModifier(Direction face) {
+                  if (hasSource() && face != getSourceFacing()) {
+                      if (getBlockState().getBlock() instanceof GearboxBlock gearbox) {
+                          return gearbox.getRatio();
+                      }
+                  }
+                  return 1.0f;
+              }
+
+              @Override
+              public float calculateStressApplied() {
+                  this.lastStressApplied = 0.0f;
+                  return 0.0f;
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/blockentity/RedstoneDynamoBlockEntity.java <<'GW_EOF'
+          package dev.gearworks.blockentity;
+
+          import com.simibubi.create.content.kinetics.base.GeneratingKineticBlockEntity;
+          import dev.gearworks.ModBlockEntities;
+          import dev.gearworks.block.RedstoneDynamoBlock;
+          import net.minecraft.core.BlockPos;
+          import net.minecraft.core.Direction;
+          import net.minecraft.world.level.block.state.BlockState;
+
+          public class RedstoneDynamoBlockEntity extends GeneratingKineticBlockEntity {
+              /** Stress capacity per RPM (60 RPM -> 480 su at full signal). */
+              private static final float CAPACITY_PER_RPM = 8.0f;
+
+              public RedstoneDynamoBlockEntity(BlockPos pos, BlockState state) {
+                  super(ModBlockEntities.redstoneDynamo(), pos, state);
+              }
+
+              @Override
+              public float getGeneratedSpeed() {
+                  BlockState state = getBlockState();
+                  if (!(state.getBlock() instanceof RedstoneDynamoBlock)) {
+                      return 0.0f;
+                  }
+                  float speed = state.getValue(RedstoneDynamoBlock.POWER) * 4.0f;
+                  Direction facing = state.getValue(RedstoneDynamoBlock.FACING);
+                  return facing.getAxisDirection() == Direction.AxisDirection.POSITIVE ? speed : -speed;
+              }
+
+              @Override
+              public float calculateAddedStressCapacity() {
+                  this.lastCapacityProvided = CAPACITY_PER_RPM;
+                  return CAPACITY_PER_RPM;
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/Gearworks.java <<'GW_EOF'
+          package dev.gearworks;
+
+          import net.fabricmc.api.ModInitializer;
+          import net.minecraft.resources.ResourceLocation;
+
+          public class Gearworks implements ModInitializer {
+              public static final String MOD_ID = "gearworks";
+
+              public static ResourceLocation id(String path) {
+                  return new ResourceLocation(MOD_ID, path);
+              }
+
+              @Override
+              public void onInitialize() {
+                  ModBlocks.register();
+                  ModItems.register();
+                  ModBlockEntities.register();
+                  ModTabs.register();
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/ModBlocks.java <<'GW_EOF'
+          package dev.gearworks;
+
+          import dev.gearworks.block.GearboxBlock;
+          import dev.gearworks.block.KineticLampBlock;
+          import dev.gearworks.block.RedstoneDynamoBlock;
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.world.level.block.Block;
+          import net.minecraft.world.level.block.SoundType;
+          import net.minecraft.world.level.block.state.BlockBehaviour;
+          import net.minecraft.world.level.material.MapColor;
+
+          public final class ModBlocks {
+              public static final Block GEARWORKS_CASING = reg("gearworks_casing", new Block(props()));
+              public static final Block OVERDRIVE_GEARBOX = reg("overdrive_gearbox", new GearboxBlock(props(), 2.0f));
+              public static final Block UNDERDRIVE_GEARBOX = reg("underdrive_gearbox", new GearboxBlock(props(), 0.5f));
+              public static final Block REDSTONE_DYNAMO = reg("redstone_dynamo", new RedstoneDynamoBlock(props()));
+              public static final Block KINETIC_LAMP = reg("kinetic_lamp",
+                      new KineticLampBlock(props().lightLevel(state -> state.getValue(KineticLampBlock.LIT) ? 15 : 0)));
+
+              private ModBlocks() {
+              }
+
+              private static BlockBehaviour.Properties props() {
+                  return BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_YELLOW).strength(3.0f, 6.0f).sound(SoundType.METAL);
+              }
+
+              private static Block reg(String name, Block block) {
+                  return Registry.register(BuiltInRegistries.BLOCK, Gearworks.id(name), block);
+              }
+
+              public static void register() {
+                  // touching the class runs the static initialisers above
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/ModItems.java <<'GW_EOF'
+          package dev.gearworks;
+
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.world.item.BlockItem;
+          import net.minecraft.world.item.Item;
+          import net.minecraft.world.level.block.Block;
+
+          public final class ModItems {
+              public static final Item GEAR_CORE = reg("gear_core", new Item(new Item.Properties()));
+              public static final Item GEARWORKS_CASING = block("gearworks_casing", ModBlocks.GEARWORKS_CASING);
+              public static final Item OVERDRIVE_GEARBOX = block("overdrive_gearbox", ModBlocks.OVERDRIVE_GEARBOX);
+              public static final Item UNDERDRIVE_GEARBOX = block("underdrive_gearbox", ModBlocks.UNDERDRIVE_GEARBOX);
+              public static final Item REDSTONE_DYNAMO = block("redstone_dynamo", ModBlocks.REDSTONE_DYNAMO);
+              public static final Item KINETIC_LAMP = block("kinetic_lamp", ModBlocks.KINETIC_LAMP);
+
+              private ModItems() {
+              }
+
+              private static Item reg(String name, Item item) {
+                  return Registry.register(BuiltInRegistries.ITEM, Gearworks.id(name), item);
+              }
+
+              private static Item block(String name, Block block) {
+                  return reg(name, new BlockItem(block, new Item.Properties()));
+              }
+
+              public static void register() {
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/ModBlockEntities.java <<'GW_EOF'
+          package dev.gearworks;
+
+          import dev.gearworks.blockentity.GearboxBlockEntity;
+          import dev.gearworks.blockentity.KineticLampBlockEntity;
+          import dev.gearworks.blockentity.RedstoneDynamoBlockEntity;
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.world.level.block.entity.BlockEntityType;
+
+          public final class ModBlockEntities {
+              private static BlockEntityType<KineticLampBlockEntity> kineticLamp;
+              private static BlockEntityType<GearboxBlockEntity> gearbox;
+              private static BlockEntityType<RedstoneDynamoBlockEntity> redstoneDynamo;
+
+              private ModBlockEntities() {
+              }
+
+              public static BlockEntityType<KineticLampBlockEntity> kineticLamp() {
+                  return kineticLamp;
+              }
+
+              public static BlockEntityType<GearboxBlockEntity> gearbox() {
+                  return gearbox;
+              }
+
+              public static BlockEntityType<RedstoneDynamoBlockEntity> redstoneDynamo() {
+                  return redstoneDynamo;
+              }
+
+              public static void register() {
+                  kineticLamp = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Gearworks.id("kinetic_lamp"),
+                          BlockEntityType.Builder.of(KineticLampBlockEntity::new, ModBlocks.KINETIC_LAMP).build(null));
+                  gearbox = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Gearworks.id("gearbox"),
+                          BlockEntityType.Builder.of(GearboxBlockEntity::new, ModBlocks.OVERDRIVE_GEARBOX, ModBlocks.UNDERDRIVE_GEARBOX).build(null));
+                  redstoneDynamo = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Gearworks.id("redstone_dynamo"),
+                          BlockEntityType.Builder.of(RedstoneDynamoBlockEntity::new, ModBlocks.REDSTONE_DYNAMO).build(null));
+              }
+          }
+          GW_EOF
+          cat > src/main/java/dev/gearworks/ModTabs.java <<'GW_EOF'
+          package dev.gearworks;
+
+          import net.fabricmc.fabric.api.itemgroup.v1.FabricItemGroup;
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.world.item.ItemStack;
+
+          public final class ModTabs {
+              private ModTabs() {
+              }
+
+              public static void register() {
+                  Registry.register(BuiltInRegistries.CREATIVE_MODE_TAB, Gearworks.id("main"),
+                          FabricItemGroup.builder()
+                                  .title(Component.translatable("itemGroup.gearworks.main"))
+                                  .icon(() -> new ItemStack(ModItems.GEAR_CORE))
+                                  .displayItems((params, out) -> {
+                                      out.accept(ModItems.GEAR_CORE);
+                                      out.accept(ModItems.GEARWORKS_CASING);
+                                      out.accept(ModItems.OVERDRIVE_GEARBOX);
+                                      out.accept(ModItems.UNDERDRIVE_GEARBOX);
+                                      out.accept(ModItems.REDSTONE_DYNAMO);
+                                      out.accept(ModItems.KINETIC_LAMP);
+                                  })
+                                  .build());
+              }
+          }
+          GW_EOF
+          cat > tools/gen_resources.py <<'GW_EOF'
+          #!/usr/bin/env python3
+          """Generates all Gearworks resources (no third-party deps).
+          usage: gen_resources.py <resources_dir> <flavor>   flavor = fabric1201 | neo1211
+          """
+          import json, math, os, struct, sys, zlib
+
+          OUT = sys.argv[1]
+          FLAVOR = sys.argv[2]
+          NEO = FLAVOR == "neo1211"
+          MOD = "gearworks"
+
+
+          def write_png(path, w, h, px):
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              raw = b"".join(b"\x00" + bytes(c for p in row for c in p) for row in px)
+
+              def chunk(t, d):
+                  c = struct.pack(">I", len(d)) + t + d
+                  return c + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+
+              png = (b"\x89PNG\r\n\x1a\n"
+                     + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                     + chunk(b"IDAT", zlib.compress(raw, 9))
+                     + chunk(b"IEND", b""))
+              with open(path, "wb") as f:
+                  f.write(png)
+
+
+          def write_json(path, obj):
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              with open(path, "w") as f:
+                  json.dump(obj, f, indent=2)
+
+
+          def canvas(w, h, c):
+              return [[c for _ in range(w)] for _ in range(h)]
+
+
+          def shade(c, k):
+              return tuple(max(0, min(255, int(v * k))) for v in c[:3]) + (c[3] if len(c) > 3 else 255,)
+
+
+          BRASS = (190, 150, 72, 255)
+          IRON = (92, 96, 108, 255)
+          RED = (200, 40, 40, 255)
+          BLUE = (60, 110, 200, 255)
+          DARK = (28, 26, 30, 255)
+          WHITE = (255, 244, 200, 255)
+
+
+          def panel(base, rivet=None):
+              px = canvas(16, 16, base)
+              edge = shade(base, 0.62)
+              hi = shade(base, 1.18)
+              for i in range(16):
+                  for (x, y) in ((i, 0), (i, 15), (0, i), (15, i)):
+                      px[y][x] = edge
+              for i in range(1, 15):
+                  px[1][i] = hi
+                  px[i][1] = hi
+              for y in range(2, 14):
+                  for x in range(2, 14):
+                      if (x + y) % 5 == 0:
+                          px[y][x] = shade(base, 0.94)
+              r = rivet or shade(base, 1.35)
+              for (x, y) in ((2, 2), (13, 2), (2, 13), (13, 13)):
+                  px[y][x] = r
+              return px
+
+
+          def hole(px, ring):
+              cx = cy = 7.5
+              for y in range(16):
+                  for x in range(16):
+                      d = math.hypot(x - cx, y - cy)
+                      if d <= 2.6:
+                          px[y][x] = DARK
+                      elif d <= 4.4:
+                          px[y][x] = ring
+              return px
+
+
+          def chevrons(px, color, right=True):
+              for k in (0, 1):
+                  for i in range(5):
+                      x = (4 + i + k * 4) if right else (11 - i - k * 4)
+                      for y in (4 + i, 11 - i):
+                          if 2 <= x <= 13:
+                              px[y][x] = color
+              return px
+
+
+          def gear_item():
+              px = canvas(16, 16, (0, 0, 0, 0))
+              cx = cy = 7.5
+              for y in range(16):
+                  for x in range(16):
+                      d = math.hypot(x - cx, y - cy)
+                      a = math.atan2(y - cy, x - cx)
+                      tooth = 6.9 if math.cos(a * 8) > 0.2 else 5.2
+                      if d <= tooth and d >= 2.2:
+                          px[y][x] = BRASS if d > 3.4 else shade(BRASS, 0.7)
+                      if 2.2 < d <= 3.4:
+                          px[y][x] = shade(BRASS, 1.25)
+                      if tooth - 1.0 < d <= tooth:
+                          px[y][x] = shade(BRASS, 0.7)
+              return px
+
+
+          def icon(size=128):
+              px = canvas(size, size, DARK)
+              c = (size - 1) / 2
+              for y in range(size):
+                  for x in range(size):
+                      t = y / size
+                      px[y][x] = (int(24 + 30 * t), int(26 + 26 * t), int(44 + 40 * t), 255)
+              def gear(cx, cy, r, teeth, col, spin):
+                  for y in range(size):
+                      for x in range(size):
+                          d = math.hypot(x - cx, y - cy)
+                          a = math.atan2(y - cy, x - cx) + spin
+                          body = r * (1.0 if math.cos(a * teeth) > 0.1 else 0.8)
+                          if d <= body and d >= r * 0.28:
+                              k = 1.0 - 0.35 * (d / r)
+                              px[y][x] = shade(col, 0.75 + 0.5 * k)
+                          if r * 0.28 <= d <= r * 0.36:
+                              px[y][x] = shade(col, 0.55)
+              gear(c + 14, c + 8, 46, 10, BRASS, 0.0)
+              gear(c - 34, c - 30, 26, 8, (150, 156, 170, 255), 0.2)
+              for y in range(size):
+                  for x in range(size):
+                      d = math.hypot(x - (c + 52), y - (c - 46))
+                      if d < 9:
+                          px[y][x] = (230, 60, 60, 255) if d > 4 else (255, 190, 120, 255)
+              for i in range(size):
+                  for e in (0, 1, size - 2, size - 1):
+                      px[i][e] = shade(BRASS, 0.5)
+                      px[e][i] = shade(BRASS, 0.5)
+              return px
+
+
+          # ---------------------------------------------------------------- textures
+          TEX = os.path.join(OUT, "assets", MOD, "textures")
+          blk = lambda n, px: write_png(os.path.join(TEX, "block", n + ".png"), 16, 16, px)
+
+          blk("gearworks_casing", panel(BRASS))
+          blk("overdrive_gearbox_side", chevrons(panel(BRASS), RED, True))
+          blk("overdrive_gearbox_end", hole(panel(BRASS), RED))
+          blk("underdrive_gearbox_side", chevrons(panel(BRASS), BLUE, False))
+          blk("underdrive_gearbox_end", hole(panel(BRASS), BLUE))
+
+          dyn = panel(IRON)
+          for y in range(4, 12):
+              for x in range(2, 14):
+                  if y % 2 == 0:
+                      dyn[y][x] = RED
+          blk("redstone_dynamo_side", dyn)
+          blk("redstone_dynamo_front", hole(panel(IRON), RED))
+
+          lamp_off = panel(shade(BRASS, 0.8))
+          for y in range(4, 12):
+              for x in range(4, 12):
+                  lamp_off[y][x] = (96, 82, 48, 255)
+          lamp_on = panel(BRASS)
+          for y in range(4, 12):
+              for x in range(4, 12):
+                  lamp_on[y][x] = (255, 236, 150, 255) if (x + y) % 4 else WHITE
+          blk("kinetic_lamp_off", lamp_off)
+          blk("kinetic_lamp_on", lamp_on)
+          blk("kinetic_lamp_end", hole(panel(BRASS), (230, 200, 110, 255)))
+
+          write_png(os.path.join(TEX, "item", "gear_core.png"), 16, 16, gear_item())
+
+          ico = icon(128)
+          write_png(os.path.join(OUT, "assets", MOD, "icon.png"), 128, 128, ico)
+          write_png(os.path.join(OUT, "icon.png"), 128, 128, ico)
+
+          # ----------------------------------------------------------------- models
+          MODELS = os.path.join(OUT, "assets", MOD, "models")
+
+
+          def cube_column(name, end, side):
+              write_json(os.path.join(MODELS, "block", name + ".json"), {
+                  "parent": "minecraft:block/cube_column",
+                  "textures": {"end": f"{MOD}:block/{end}", "side": f"{MOD}:block/{side}"}})
+
+
+          def item_parent(name, parent):
+              write_json(os.path.join(MODELS, "item", name + ".json"), {"parent": f"{MOD}:block/{parent}"})
+
+
+          write_json(os.path.join(MODELS, "block", "gearworks_casing.json"),
+                     {"parent": "minecraft:block/cube_all", "textures": {"all": f"{MOD}:block/gearworks_casing"}})
+          cube_column("overdrive_gearbox", "overdrive_gearbox_end", "overdrive_gearbox_side")
+          cube_column("underdrive_gearbox", "underdrive_gearbox_end", "underdrive_gearbox_side")
+          cube_column("redstone_dynamo", "redstone_dynamo_front", "redstone_dynamo_side")
+          cube_column("kinetic_lamp_off", "kinetic_lamp_end", "kinetic_lamp_off")
+          cube_column("kinetic_lamp_on", "kinetic_lamp_end", "kinetic_lamp_on")
+
+          item_parent("gearworks_casing", "gearworks_casing")
+          item_parent("overdrive_gearbox", "overdrive_gearbox")
+          item_parent("underdrive_gearbox", "underdrive_gearbox")
+          item_parent("redstone_dynamo", "redstone_dynamo")
+          item_parent("kinetic_lamp", "kinetic_lamp_off")
+          write_json(os.path.join(MODELS, "item", "gear_core.json"),
+                     {"parent": "minecraft:item/generated", "textures": {"layer0": f"{MOD}:item/gear_core"}})
+
+          # ------------------------------------------------------------- blockstates
+          BS = os.path.join(OUT, "assets", MOD, "blockstates")
+          AXIS_ROT = {"x": {"x": 90, "y": 90}, "y": {}, "z": {"x": 90}}
+
+
+          def axis_state(name, model_fn=None):
+              v = {}
+              for a, rot in AXIS_ROT.items():
+                  v[f"axis={a}"] = dict({"model": f"{MOD}:block/{name}"}, **rot)
+              write_json(os.path.join(BS, name + ".json"), {"variants": v})
+
+
+          write_json(os.path.join(BS, "gearworks_casing.json"), {"variants": {"": {"model": f"{MOD}:block/gearworks_casing"}}})
+          axis_state("overdrive_gearbox")
+          axis_state("underdrive_gearbox")
+
+          lamp = {}
+          for a, rot in AXIS_ROT.items():
+              for lit in ("false", "true"):
+                  lamp[f"axis={a},lit={lit}"] = dict(
+                      {"model": f"{MOD}:block/kinetic_lamp_{'on' if lit == 'true' else 'off'}"}, **rot)
+          write_json(os.path.join(BS, "kinetic_lamp.json"), {"variants": lamp})
+
+          FACING_ROT = {"up": {}, "down": {"x": 180}, "north": {"x": 90}, "south": {"x": 90, "y": 180},
+                        "east": {"x": 90, "y": 90}, "west": {"x": 90, "y": 270}}
+          write_json(os.path.join(BS, "redstone_dynamo.json"), {"variants": {
+              f"facing={f}": dict({"model": f"{MOD}:block/redstone_dynamo"}, **rot) for f, rot in FACING_ROT.items()}})
+
+          # -------------------------------------------------------------------- lang
+          write_json(os.path.join(OUT, "assets", MOD, "lang", "en_us.json"), {
+              "itemGroup.gearworks.main": "Gearworks",
+              "block.gearworks.gearworks_casing": "Gearworks Casing",
+              "block.gearworks.overdrive_gearbox": "Overdrive Gearbox",
+              "block.gearworks.underdrive_gearbox": "Underdrive Gearbox",
+              "block.gearworks.redstone_dynamo": "Redstone Dynamo",
+              "block.gearworks.kinetic_lamp": "Kinetic Lamp",
+              "item.gearworks.gear_core": "Gear Core",
+          })
+
+          # -------------------------------------------------------------------- data
+          DATA = os.path.join(OUT, "data")
+          RECIPES = os.path.join(DATA, MOD, "recipe" if NEO else "recipes")
+          LOOT = os.path.join(DATA, MOD, "loot_table" if NEO else "loot_tables", "blocks")
+          TAGS = os.path.join(DATA, "minecraft", "tags", "block" if NEO else "blocks", "mineable")
+
+
+          def result(item, count=1):
+              return {"id": item, "count": count} if NEO else {"item": item, "count": count}
+
+
+          def ing(i):
+              return {"item": i}
+
+
+          def shaped(name, pattern, key, out, count=1):
+              write_json(os.path.join(RECIPES, name + ".json"), {
+                  "type": "minecraft:crafting_shaped", "category": "misc", "pattern": pattern,
+                  "key": {k: ing(v) for k, v in key.items()}, "result": result(out, count)})
+
+
+          def shapeless(name, items, out, count=1):
+              write_json(os.path.join(RECIPES, name + ".json"), {
+                  "type": "minecraft:crafting_shapeless", "category": "misc",
+                  "ingredients": [ing(i) for i in items], "result": result(out, count)})
+
+
+          shaped("gear_core", [" B ", "BCB", " B "],
+                 {"B": "create:brass_ingot", "C": "create:cogwheel"}, f"{MOD}:gear_core")
+          shapeless("gearworks_casing", ["create:brass_casing", "create:iron_sheet"], f"{MOD}:gearworks_casing")
+          shapeless("overdrive_gearbox", [f"{MOD}:gearworks_casing", f"{MOD}:gear_core", "create:cogwheel"],
+                    f"{MOD}:overdrive_gearbox")
+          shapeless("underdrive_gearbox", [f"{MOD}:gearworks_casing", f"{MOD}:gear_core", "create:large_cogwheel"],
+                    f"{MOD}:underdrive_gearbox")
+          shaped("redstone_dynamo", ["RBR", "BGB", "RCR"],
+                 {"R": "minecraft:redstone", "B": "create:brass_ingot", "G": f"{MOD}:gear_core",
+                  "C": f"{MOD}:gearworks_casing"}, f"{MOD}:redstone_dynamo")
+          shapeless("kinetic_lamp", ["minecraft:glowstone", "create:shaft", "create:brass_sheet"], f"{MOD}:kinetic_lamp")
+
+          BLOCKS = ["gearworks_casing", "overdrive_gearbox", "underdrive_gearbox", "redstone_dynamo", "kinetic_lamp"]
+          for b in BLOCKS:
+              write_json(os.path.join(LOOT, b + ".json"), {
+                  "type": "minecraft:block",
+                  "pools": [{"rolls": 1.0, "bonus_rolls": 0.0,
+                             "entries": [{"type": "minecraft:item", "name": f"{MOD}:{b}"}],
+                             "conditions": [{"condition": "minecraft:survives_explosion"}]}]})
+
+          write_json(os.path.join(TAGS, "pickaxe.json"), {"replace": False, "values": [f"{MOD}:{b}" for b in BLOCKS]})
+          print("resources generated for", FLAVOR)
+          GW_EOF
+          python3 tools/gen_resources.py src/main/resources fabric1201
+          echo '--- generated project ---'
+          find src -type f | sort
+
+      - name: Build
+        run: gradle build --no-daemon --stacktrace
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: gearworks-fabric-1.20.1
+          path: build/libs/*[0-9].jar
+          if-no-files-found: error
