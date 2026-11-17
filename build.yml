@@ -52,7 +52,6 @@ jobs:
           minecraft_version=1.21.1
           neo_version=21.1.219
           create_version=6.0.11-319
-          ponder_version=1.0.85
           flywheel_version=1.0.6
           registrate_version=MC1.21-1.3.0+67
           EOF
@@ -89,7 +88,6 @@ jobs:
 
           dependencies {
               implementation("com.simibubi.create:create-${minecraft_version}:${create_version}:slim") { transitive = false }
-              implementation("net.createmod.ponder:Ponder-NeoForge-${minecraft_version}:${ponder_version}")
               compileOnly("dev.engine-room.flywheel:flywheel-neoforge-api-${minecraft_version}:${flywheel_version}")
               runtimeOnly("dev.engine-room.flywheel:flywheel-neoforge-${minecraft_version}:${flywheel_version}")
               implementation("com.tterrag.registrate:Registrate:${registrate_version}")
