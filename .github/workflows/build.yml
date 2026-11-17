@@ -1,4 +1,4 @@
-name: Build Gearworks (NeoForge 1.21.1)
+name: Build Gearworks (Fabric 1.20.1)
 
 on:
   push:
@@ -20,16 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Set up Java 21
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
 
-      - name: Set up Gradle 8.14.3
+      - name: Set up Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.14.3'
+          gradle-version: '8.10.2'
 
       - name: Generate the mod project (sources, textures, icon, recipes)
         env:
@@ -40,117 +40,119 @@ jobs:
           cat > settings.gradle <<'GW_EOF'
           pluginManagement {
               repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
                   gradlePluginPortal()
-                  maven { url = 'https://maven.neoforged.net/releases' }
+                  mavenCentral()
               }
           }
-          rootProject.name = 'gearworks-neoforge-1.21.1'
+          rootProject.name = 'gearworks-fabric-1.20.1'
           GW_EOF
-          BASE="https://maven.createmod.net/com/simibubi/create/create-1.21.1"
-          CREATE_VERSION="${CREATE_VERSION_INPUT:-}"
-          if [ -z "$CREATE_VERSION" ]; then
-            CREATE_VERSION="$(curl -fsSL "$BASE/maven-metadata.xml" | grep -oE "<version>6\.0\.[^<]+" | sed "s/<version>//" | sort -V | tail -1 || true)"
-          fi
-          CREATE_VERSION="${CREATE_VERSION:-6.0.11-313}"
-          if curl -fsI "$BASE/$CREATE_VERSION/create-1.21.1-$CREATE_VERSION-slim.jar" > /dev/null; then
-            CREATE_CLASSIFIER=":slim"
-          else
-            CREATE_CLASSIFIER=""
-          fi
-          echo "Compiling against Create $CREATE_VERSION (classifier: ${CREATE_CLASSIFIER:-none})"
+          CREATE_VERSION="${CREATE_VERSION_INPUT:-0.5.1-j-build.1600+mc1.20.1}"
           cat > gradle.properties <<GW_EOF
           org.gradle.jvmargs=-Xmx3G
           org.gradle.daemon=false
           mod_version=1.0.0
-          minecraft_version=1.21.1
-          neo_version=21.1.219
+          minecraft_version=1.20.1
+          loader_version=0.16.10
+          fabric_version=0.92.2+1.20.1
           create_version=$CREATE_VERSION
-          create_classifier=$CREATE_CLASSIFIER
-          ponder_version=1.0.85
-          flywheel_version=1.0.6
-          registrate_version=MC1.21-1.3.0+67
           GW_EOF
           cat > build.gradle <<'GW_EOF'
           plugins {
-              id 'java-library'
-              id 'net.neoforged.moddev' version '2.0.148'
+              id 'fabric-loom' version '1.8.+'
           }
 
           version = project.mod_version
           group = 'dev.gearworks'
 
           base {
-              archivesName = 'gearworks-neoforge-1.21.1'
+              archivesName = 'gearworks-fabric-1.20.1'
           }
-
-          java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
           repositories {
               mavenCentral()
-              maven { url = 'https://maven.createmod.net' }          // Create, Ponder, Flywheel
-              maven { url = 'https://maven.ithundxr.dev/snapshots' } // Registrate
-              maven { url = 'https://maven.neoforged.net/releases' }
-              maven { url = 'https://raw.githubusercontent.com/Fuzss/modresources/main/maven/' } // Ponder deps
+              maven { url = 'https://mvn.devos.one/snapshots/' }
+              maven { url = 'https://mvn.devos.one/releases/' }
+              maven { url = 'https://maven.tterrag.com/' }
+              maven { url = 'https://raw.githubusercontent.com/Fuzss/modresources/main/maven/' } // Forge Config API Port
+              maven { url = 'https://maven.fuzs.dev/' }
+              maven {
+                  url = 'https://maven.jamieswhiteshirt.com/libs-release'
+                  content { includeGroup 'com.jamieswhiteshirt' }
+              }
+              maven {
+                  url = 'https://jitpack.io/'
+                  content { includeGroupAndSubgroups 'com.github' }
+              }
+              maven { url = 'https://maven.terraformersmc.com/releases/' }
+              maven { url = 'https://maven.shedaniel.me/' }
+              maven { url = 'https://maven.blamejared.com/' }
+              maven {
+                  url = 'https://api.modrinth.com/maven'
+                  content { includeGroup 'maven.modrinth' }
+              }
           }
 
-          neoForge {
-              version = project.neo_version
+          configurations.configureEach {
+              resolutionStrategy {
+                  force "net.fabricmc:fabric-loader:${project.loader_version}"
+                  // forgeconfigapiport 8.0.0 is not on any normal maven any more: take the same jar from Modrinth's maven
+                  dependencySubstitution {
+                      substitute module('fuzs.forgeconfigapiport:forgeconfigapiport-fabric') using module('maven.modrinth:forge-config-api-port:v8.0.0-1.20.1-Fabric')
+                  }
+              }
           }
 
           dependencies {
-              compileOnly("com.simibubi.create:create-${project.minecraft_version}:${project.create_version}${project.create_classifier}") { transitive = false }
-              compileOnly("net.createmod.ponder:Ponder-NeoForge-${project.minecraft_version}:${project.ponder_version}") { transitive = false }
-              compileOnly("dev.engine-room.flywheel:flywheel-neoforge-api-${project.minecraft_version}:${project.flywheel_version}") { transitive = false }
-              compileOnly("com.tterrag.registrate:Registrate:${project.registrate_version}") { transitive = false }
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings loom.officialMojangMappings()
+
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+              // Create Fabric (its own dependencies are resolved transitively)
+              modImplementation "com.simibubi.create:create-fabric-${project.minecraft_version}:${project.create_version}"
           }
 
           processResources {
-              inputs.property 'mod_version', project.mod_version
-              filesMatching('META-INF/neoforge.mods.toml') {
-                  expand 'mod_version': project.mod_version
+              inputs.property 'version', project.version
+              filesMatching('fabric.mod.json') {
+                  expand 'version': project.version
               }
           }
 
           tasks.withType(JavaCompile).configureEach {
+              options.release = 17
               options.encoding = 'UTF-8'
           }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+          }
           GW_EOF
-          mkdir -p src/main/resources/META-INF
-          cat > src/main/resources/META-INF/neoforge.mods.toml <<'GW_EOF'
-          modLoader = "javafml"
-          loaderVersion = "[1,)"
-          license = "MIT"
-
-          [[mods]]
-          modId = "gearworks"
-          version = "${mod_version}"
-          displayName = "Gearworks"
-          logoFile = "icon.png"
-          authors = "Gearworks"
-          description = '''
-          A Create addon: Overdrive and Underdrive gearboxes, a Redstone Dynamo, a Kinetic Lamp and Gearworks casing.
-          '''
-
-          [[dependencies.gearworks]]
-          modId = "neoforge"
-          type = "required"
-          versionRange = "[21.1,)"
-          ordering = "NONE"
-          side = "BOTH"
-
-          [[dependencies.gearworks]]
-          modId = "minecraft"
-          type = "required"
-          versionRange = "[1.21.1,1.22)"
-          ordering = "NONE"
-          side = "BOTH"
-
-          [[dependencies.gearworks]]
-          modId = "create"
-          type = "required"
-          versionRange = "[6.0.0,)"
-          ordering = "AFTER"
-          side = "BOTH"
+          cat > src/main/resources/fabric.mod.json <<'GW_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "gearworks",
+            "version": "${version}",
+            "name": "Gearworks",
+            "description": "A Create addon: Overdrive and Underdrive gearboxes, a Redstone Dynamo, a Kinetic Lamp and Gearworks casing.",
+            "authors": ["Gearworks"],
+            "license": "MIT",
+            "icon": "assets/gearworks/icon.png",
+            "environment": "*",
+            "entrypoints": {
+              "main": ["dev.gearworks.Gearworks"]
+            },
+            "depends": {
+              "fabricloader": ">=0.14.21",
+              "minecraft": "1.20.1",
+              "java": ">=17",
+              "fabric-api": "*",
+              "create": "*"
+            }
+          }
           GW_EOF
           cat > src/main/java/dev/gearworks/block/KineticLampBlock.java <<'GW_EOF'
           package dev.gearworks.block;
@@ -435,23 +437,22 @@ jobs:
           cat > src/main/java/dev/gearworks/Gearworks.java <<'GW_EOF'
           package dev.gearworks;
 
+          import net.fabricmc.api.ModInitializer;
           import net.minecraft.resources.ResourceLocation;
-          import net.neoforged.bus.api.IEventBus;
-          import net.neoforged.fml.common.Mod;
 
-          @Mod(Gearworks.MOD_ID)
-          public class Gearworks {
+          public class Gearworks implements ModInitializer {
               public static final String MOD_ID = "gearworks";
 
               public static ResourceLocation id(String path) {
-                  return ResourceLocation.fromNamespaceAndPath(MOD_ID, path);
+                  return new ResourceLocation(MOD_ID, path);
               }
 
-              public Gearworks(IEventBus modBus) {
-                  ModBlocks.BLOCKS.register(modBus);
-                  ModItems.ITEMS.register(modBus);
-                  ModBlockEntities.BLOCK_ENTITIES.register(modBus);
-                  ModTabs.TABS.register(modBus);
+              @Override
+              public void onInitialize() {
+                  ModBlocks.register();
+                  ModItems.register();
+                  ModBlockEntities.register();
+                  ModTabs.register();
               }
           }
           GW_EOF
@@ -461,22 +462,20 @@ jobs:
           import dev.gearworks.block.GearboxBlock;
           import dev.gearworks.block.KineticLampBlock;
           import dev.gearworks.block.RedstoneDynamoBlock;
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
           import net.minecraft.world.level.block.Block;
           import net.minecraft.world.level.block.SoundType;
           import net.minecraft.world.level.block.state.BlockBehaviour;
           import net.minecraft.world.level.material.MapColor;
-          import net.neoforged.neoforge.registries.DeferredBlock;
-          import net.neoforged.neoforge.registries.DeferredRegister;
 
           public final class ModBlocks {
-              public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks(Gearworks.MOD_ID);
-
-              public static final DeferredBlock<Block> GEARWORKS_CASING = BLOCKS.register("gearworks_casing", () -> new Block(props()));
-              public static final DeferredBlock<GearboxBlock> OVERDRIVE_GEARBOX = BLOCKS.register("overdrive_gearbox", () -> new GearboxBlock(props(), 2.0f));
-              public static final DeferredBlock<GearboxBlock> UNDERDRIVE_GEARBOX = BLOCKS.register("underdrive_gearbox", () -> new GearboxBlock(props(), 0.5f));
-              public static final DeferredBlock<RedstoneDynamoBlock> REDSTONE_DYNAMO = BLOCKS.register("redstone_dynamo", () -> new RedstoneDynamoBlock(props()));
-              public static final DeferredBlock<KineticLampBlock> KINETIC_LAMP = BLOCKS.register("kinetic_lamp",
-                      () -> new KineticLampBlock(props().lightLevel(state -> state.getValue(KineticLampBlock.LIT) ? 15 : 0)));
+              public static final Block GEARWORKS_CASING = reg("gearworks_casing", new Block(props()));
+              public static final Block OVERDRIVE_GEARBOX = reg("overdrive_gearbox", new GearboxBlock(props(), 2.0f));
+              public static final Block UNDERDRIVE_GEARBOX = reg("underdrive_gearbox", new GearboxBlock(props(), 0.5f));
+              public static final Block REDSTONE_DYNAMO = reg("redstone_dynamo", new RedstoneDynamoBlock(props()));
+              public static final Block KINETIC_LAMP = reg("kinetic_lamp",
+                      new KineticLampBlock(props().lightLevel(state -> state.getValue(KineticLampBlock.LIT) ? 15 : 0)));
 
               private ModBlocks() {
               }
@@ -484,34 +483,45 @@ jobs:
               private static BlockBehaviour.Properties props() {
                   return BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_YELLOW).strength(3.0f, 6.0f).sound(SoundType.METAL);
               }
+
+              private static Block reg(String name, Block block) {
+                  return Registry.register(BuiltInRegistries.BLOCK, Gearworks.id(name), block);
+              }
+
+              public static void register() {
+                  // touching the class runs the static initialisers above
+              }
           }
           GW_EOF
           cat > src/main/java/dev/gearworks/ModItems.java <<'GW_EOF'
           package dev.gearworks;
 
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
           import net.minecraft.world.item.BlockItem;
           import net.minecraft.world.item.Item;
           import net.minecraft.world.level.block.Block;
-          import net.neoforged.neoforge.registries.DeferredHolder;
-          import net.neoforged.neoforge.registries.DeferredRegister;
-
-          import java.util.function.Supplier;
 
           public final class ModItems {
-              public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(Gearworks.MOD_ID);
-
-              public static final DeferredHolder<Item, Item> GEAR_CORE = ITEMS.register("gear_core", () -> new Item(new Item.Properties()));
-              public static final DeferredHolder<Item, Item> GEARWORKS_CASING = block("gearworks_casing", ModBlocks.GEARWORKS_CASING);
-              public static final DeferredHolder<Item, Item> OVERDRIVE_GEARBOX = block("overdrive_gearbox", ModBlocks.OVERDRIVE_GEARBOX);
-              public static final DeferredHolder<Item, Item> UNDERDRIVE_GEARBOX = block("underdrive_gearbox", ModBlocks.UNDERDRIVE_GEARBOX);
-              public static final DeferredHolder<Item, Item> REDSTONE_DYNAMO = block("redstone_dynamo", ModBlocks.REDSTONE_DYNAMO);
-              public static final DeferredHolder<Item, Item> KINETIC_LAMP = block("kinetic_lamp", ModBlocks.KINETIC_LAMP);
+              public static final Item GEAR_CORE = reg("gear_core", new Item(new Item.Properties()));
+              public static final Item GEARWORKS_CASING = block("gearworks_casing", ModBlocks.GEARWORKS_CASING);
+              public static final Item OVERDRIVE_GEARBOX = block("overdrive_gearbox", ModBlocks.OVERDRIVE_GEARBOX);
+              public static final Item UNDERDRIVE_GEARBOX = block("underdrive_gearbox", ModBlocks.UNDERDRIVE_GEARBOX);
+              public static final Item REDSTONE_DYNAMO = block("redstone_dynamo", ModBlocks.REDSTONE_DYNAMO);
+              public static final Item KINETIC_LAMP = block("kinetic_lamp", ModBlocks.KINETIC_LAMP);
 
               private ModItems() {
               }
 
-              private static DeferredHolder<Item, Item> block(String name, Supplier<? extends Block> block) {
-                  return ITEMS.register(name, () -> new BlockItem(block.get(), new Item.Properties()));
+              private static Item reg(String name, Item item) {
+                  return Registry.register(BuiltInRegistries.ITEM, Gearworks.id(name), item);
+              }
+
+              private static Item block(String name, Block block) {
+                  return reg(name, new BlockItem(block, new Item.Properties()));
+              }
+
+              public static void register() {
               }
           }
           GW_EOF
@@ -521,73 +531,67 @@ jobs:
           import dev.gearworks.blockentity.GearboxBlockEntity;
           import dev.gearworks.blockentity.KineticLampBlockEntity;
           import dev.gearworks.blockentity.RedstoneDynamoBlockEntity;
-          import net.minecraft.core.registries.Registries;
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
           import net.minecraft.world.level.block.entity.BlockEntityType;
-          import net.neoforged.neoforge.registries.DeferredHolder;
-          import net.neoforged.neoforge.registries.DeferredRegister;
 
           public final class ModBlockEntities {
-              public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
-                      DeferredRegister.create(Registries.BLOCK_ENTITY_TYPE, Gearworks.MOD_ID);
-
-              public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<KineticLampBlockEntity>> KINETIC_LAMP =
-                      BLOCK_ENTITIES.register("kinetic_lamp", () ->
-                              BlockEntityType.Builder.of(KineticLampBlockEntity::new, ModBlocks.KINETIC_LAMP.get()).build(null));
-
-              public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<GearboxBlockEntity>> GEARBOX =
-                      BLOCK_ENTITIES.register("gearbox", () ->
-                              BlockEntityType.Builder.of(GearboxBlockEntity::new,
-                                      ModBlocks.OVERDRIVE_GEARBOX.get(), ModBlocks.UNDERDRIVE_GEARBOX.get()).build(null));
-
-              public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<RedstoneDynamoBlockEntity>> REDSTONE_DYNAMO =
-                      BLOCK_ENTITIES.register("redstone_dynamo", () ->
-                              BlockEntityType.Builder.of(RedstoneDynamoBlockEntity::new, ModBlocks.REDSTONE_DYNAMO.get()).build(null));
+              private static BlockEntityType<KineticLampBlockEntity> kineticLamp;
+              private static BlockEntityType<GearboxBlockEntity> gearbox;
+              private static BlockEntityType<RedstoneDynamoBlockEntity> redstoneDynamo;
 
               private ModBlockEntities() {
               }
 
               public static BlockEntityType<KineticLampBlockEntity> kineticLamp() {
-                  return KINETIC_LAMP.get();
+                  return kineticLamp;
               }
 
               public static BlockEntityType<GearboxBlockEntity> gearbox() {
-                  return GEARBOX.get();
+                  return gearbox;
               }
 
               public static BlockEntityType<RedstoneDynamoBlockEntity> redstoneDynamo() {
-                  return REDSTONE_DYNAMO.get();
+                  return redstoneDynamo;
+              }
+
+              public static void register() {
+                  kineticLamp = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Gearworks.id("kinetic_lamp"),
+                          BlockEntityType.Builder.of(KineticLampBlockEntity::new, ModBlocks.KINETIC_LAMP).build(null));
+                  gearbox = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Gearworks.id("gearbox"),
+                          BlockEntityType.Builder.of(GearboxBlockEntity::new, ModBlocks.OVERDRIVE_GEARBOX, ModBlocks.UNDERDRIVE_GEARBOX).build(null));
+                  redstoneDynamo = Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, Gearworks.id("redstone_dynamo"),
+                          BlockEntityType.Builder.of(RedstoneDynamoBlockEntity::new, ModBlocks.REDSTONE_DYNAMO).build(null));
               }
           }
           GW_EOF
           cat > src/main/java/dev/gearworks/ModTabs.java <<'GW_EOF'
           package dev.gearworks;
 
-          import net.minecraft.core.registries.Registries;
+          import net.fabricmc.fabric.api.itemgroup.v1.FabricItemGroup;
+          import net.minecraft.core.Registry;
+          import net.minecraft.core.registries.BuiltInRegistries;
           import net.minecraft.network.chat.Component;
-          import net.minecraft.world.item.CreativeModeTab;
           import net.minecraft.world.item.ItemStack;
-          import net.neoforged.neoforge.registries.DeferredHolder;
-          import net.neoforged.neoforge.registries.DeferredRegister;
 
           public final class ModTabs {
-              public static final DeferredRegister<CreativeModeTab> TABS =
-                      DeferredRegister.create(Registries.CREATIVE_MODE_TAB, Gearworks.MOD_ID);
-
-              public static final DeferredHolder<CreativeModeTab, CreativeModeTab> MAIN = TABS.register("main", () ->
-                      CreativeModeTab.builder()
-                              .title(Component.translatable("itemGroup.gearworks.main"))
-                              .icon(() -> new ItemStack(ModItems.GEAR_CORE.get()))
-                              .displayItems((params, out) -> {
-                                  out.accept(ModItems.GEAR_CORE.get());
-                                  out.accept(ModItems.GEARWORKS_CASING.get());
-                                  out.accept(ModItems.OVERDRIVE_GEARBOX.get());
-                                  out.accept(ModItems.UNDERDRIVE_GEARBOX.get());
-                                  out.accept(ModItems.REDSTONE_DYNAMO.get());
-                                  out.accept(ModItems.KINETIC_LAMP.get());
-                              })
-                              .build());
-
               private ModTabs() {
+              }
+
+              public static void register() {
+                  Registry.register(BuiltInRegistries.CREATIVE_MODE_TAB, Gearworks.id("main"),
+                          FabricItemGroup.builder()
+                                  .title(Component.translatable("itemGroup.gearworks.main"))
+                                  .icon(() -> new ItemStack(ModItems.GEAR_CORE))
+                                  .displayItems((params, out) -> {
+                                      out.accept(ModItems.GEAR_CORE);
+                                      out.accept(ModItems.GEARWORKS_CASING);
+                                      out.accept(ModItems.OVERDRIVE_GEARBOX);
+                                      out.accept(ModItems.UNDERDRIVE_GEARBOX);
+                                      out.accept(ModItems.REDSTONE_DYNAMO);
+                                      out.accept(ModItems.KINETIC_LAMP);
+                                  })
+                                  .build());
               }
           }
           GW_EOF
@@ -888,7 +892,7 @@ jobs:
           write_json(os.path.join(TAGS, "pickaxe.json"), {"replace": False, "values": [f"{MOD}:{b}" for b in BLOCKS]})
           print("resources generated for", FLAVOR)
           GW_EOF
-          python3 tools/gen_resources.py src/main/resources neo1211
+          python3 tools/gen_resources.py src/main/resources fabric1201
           echo '--- generated project ---'
           find src -type f | sort
 
@@ -898,6 +902,6 @@ jobs:
       - name: Upload jar
         uses: actions/upload-artifact@v4
         with:
-          name: gearworks-neoforge-1.21.1
+          name: gearworks-fabric-1.20.1
           path: build/libs/*[0-9].jar
           if-no-files-found: error
